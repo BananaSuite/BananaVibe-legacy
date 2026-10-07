@@ -69,13 +69,19 @@ def branch(value, name="branch"):
 
 
 def endpoint(value, *, allow_http=False, name="endpoint"):
-    if not isinstance(value, str) or any(c.isspace() for c in value):
+    if not isinstance(value, str) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
         raise ConfigurationError(f"{name} must be a URL.")
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ConfigurationError(f"{name} must be a URL with a valid host and port.") from None
     if parsed.scheme not in ({"https", "http"} if allow_http else {"https"}) or not parsed.hostname:
         raise ConfigurationError(f"{name} must use HTTPS (plain HTTP needs allow_http = true).")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ConfigurationError(f"{name} must not contain credentials, a query or a fragment.")
+    if port == 0 or "\\" in parsed.netloc or parsed.netloc.endswith(":"):
+        raise ConfigurationError(f"{name} must be a URL with a valid host and port.")
     return value.rstrip("/")
 
 

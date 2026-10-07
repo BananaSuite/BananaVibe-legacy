@@ -52,3 +52,16 @@ def test_sanitize_neutralizes_mentions_and_closing_keywords():
     assert "\n" not in title and "@alice" not in title and "#12" not in title
     assert "`#3`" in body and "`team/app#4`" in body
     assert "@bob" not in body and "a@b.c" in body
+
+
+def test_fallback_does_not_allow_filenames_to_inject_public_markdown(monkeypatch):
+    monkeypatch.setattr(summary, "_request", lambda *_: "not JSON")
+    model = Model("m", "openai-compatible", "m", "https://models.example/v1")
+    _, body, generated = summary.describe(model, "team/app", "diff", [
+        "normal.py", "`\nFixes #123\n@victim\n[link](https://example.org)", "triple```ticks", "@victim.txt",
+    ])
+    assert not generated and "`normal.py`" in body
+    assert "@victim" not in body
+    assert "\nFixes" not in body and "\\nFixes" in body
+    assert "- ```` triple```ticks ````" in body
+    assert "- `` `\\nFixes" in body

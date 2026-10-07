@@ -168,3 +168,24 @@ def test_leftovers_of_a_killed_run_of_the_same_task_are_removed(monkeypatch, tmp
     calls.clear()
     engine_module.sweep("*")
     assert calls == [] and other.exists()
+
+
+def test_shutdown_removes_private_credentials_even_when_docker_times_out(monkeypatch):
+    engine = object.__new__(Engine)
+    engine.session, engine.port = None, None
+    engine.agent, engine.gateway = "agent", "gateway"
+    engine.internal, engine.outside = "internal", "outside"
+    engine._temporary = tempfile.TemporaryDirectory(prefix="test-bananavibe-cleanup-")
+    from pathlib import Path
+    root = Path(engine._temporary.name)
+    (root / "gateway.json").write_text('{"api_key": "test-secret"}')
+    calls = []
+
+    def unreachable_docker(*args, **kwargs):
+        calls.append(args)
+        raise subprocess.TimeoutExpired(["docker", *args], kwargs["timeout"])
+    monkeypatch.setattr(engine_module, "docker", unreachable_docker)
+    engine.close()
+    assert not root.exists()
+    assert calls == [("rm", "--force", "--volumes", "agent", "agent-check", "gateway"),
+                     ("network", "rm", "internal"), ("network", "rm", "outside")]

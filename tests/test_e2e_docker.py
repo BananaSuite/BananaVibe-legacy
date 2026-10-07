@@ -45,10 +45,10 @@ class ScriptedModel(BaseHTTPRequestHandler):
         if "chat/completions" not in self.path:
             self.send_error(404)
             return
-        if request.get("tools") and last["role"] == "user" and not self.server.acted:
-            self.server.acted = True
+        if request.get("tools") and last["role"] == "user" and self.server.commands:
+            command = self.server.commands.pop(0)
             delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {
-                "name": "bash", "arguments": json.dumps({"command": COMMAND, "description": "Apply the change"})}}]}
+                "name": "bash", "arguments": json.dumps({"command": command, "description": "Apply the change"})}}]}
             finish = "tool_calls"
         else:
             delta, finish = {"role": "assistant", "content": "Done."}, "stop"
@@ -88,14 +88,17 @@ def model_server():
     if not shutil.which("docker") or subprocess.run(["docker", "info"], capture_output=True).returncode:
         pytest.skip("Docker is not available")
     server = ThreadingHTTPServer(("0.0.0.0", 0), ScriptedModel)
-    server.requests, server.acted = [], False
+    server.requests, server.commands = [], [COMMAND]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
     server.shutdown()
     server.server_close()
 
 
-def test_full_task_in_the_real_sandbox(tmp_path, model_server):
+@pytest.mark.parametrize("first_answer", [2, 3])
+def test_full_task_in_the_real_sandbox(tmp_path, model_server, first_answer):
+    if first_answer != 2:
+        model_server.commands.insert(0, COMMAND.replace("answer = 2", f"answer = {first_answer}"))
     endpoint = f"http://{docker_bridge_address()}:{model_server.server_port}/v1"
     models = {"coding": Model("coding", "openai-compatible", "mock-model", endpoint, "")}
     forge = LocalForge(tmp_path, models=models, allow_http=True, egress=("*",),
@@ -117,6 +120,8 @@ def test_full_task_in_the_real_sandbox(tmp_path, model_server):
     assert any("PRIVATE" in json.dumps(request) for request in model_server.requests)
     summary_requests = [r for r in model_server.requests if "<diff>" in json.dumps(r)]
     assert summary_requests and all("PRIVATE" not in json.dumps(r) for r in summary_requests)
+    if first_answer != 2:
+        assert any("acceptance checks failed on a clean checkout" in json.dumps(r) for r in model_server.requests)
     # No containers or networks are left behind.
     leftovers = subprocess.run(["docker", "ps", "-aq", "--filter", "label=org.bananavibe.task"],
                                capture_output=True, text=True).stdout.split()

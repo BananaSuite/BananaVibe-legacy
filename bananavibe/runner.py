@@ -108,11 +108,16 @@ class TaskRunner:
         failing_since = None
         while not self.stopping.wait(self.config.limits.poll_seconds):
             try:
+                issue = self.forge.issue(self.number)
                 with self.lock:
                     state = self._fresh()
+                    self._assert_approved(issue, state)
                     if state["lease_until"] - self.store.clock() < lease / 2:
                         self._update(phase=self.phase)
                 failing_since = None
+            except Interrupted as error:
+                self.heartbeat_error = error
+                return
             except LeaseLost as error:
                 self.heartbeat_error = error
                 return
@@ -133,6 +138,8 @@ class TaskRunner:
             self.phase = phase
         if isinstance(self.heartbeat_error, LeaseLost):
             raise self.heartbeat_error
+        if isinstance(self.heartbeat_error, Interrupted):
+            raise self.heartbeat_error
         if self.heartbeat_error:
             raise Interrupted("paused", "BananaVibe lost contact with the forge and could not renew its lease "
                                         f"({type(self.heartbeat_error).__name__}).")
@@ -145,6 +152,10 @@ class TaskRunner:
         if state["desired"] != "running":
             outcome = state["desired"] if state["desired"] in {"stopped", "failed"} else "paused"
             raise Interrupted(outcome, state.get("reason") or "A maintainer stopped the task.")
+        if self.issue and state["approved"] and state["approved"] != issue_digest(self.issue):
+            # A maintainer approved edited text while this session was still
+            # using the old prompt. Start a fresh session on the saved work.
+            raise Redirected("issue")
         if self.seen_request is not None and state["request"] != self.seen_request:
             if state["operation"] == "restart":
                 raise Redirected("restart")
@@ -268,10 +279,8 @@ class TaskRunner:
         issue = self.forge.issue(self.number)
         if issue.get("pull_request") or issue.get("is_pull"):
             raise TaskError("Tasks must come from an issue, not a pull request.")
+        self._assert_approved(issue, state)
         digest = issue_digest(issue)
-        if state["approved"] and state["approved"] != digest:
-            raise Interrupted("blocked", "The issue title or description changed after a maintainer approved it. "
-                                         "Review the edit, then use `/banana resume` to approve the current text.")
         self.issue = issue
         changes = {"approved": digest}
         if restart:
@@ -294,6 +303,12 @@ class TaskRunner:
             # never let an edited record aim the bot at another branch.
             raise TaskError("The saved branch is not a BananaVibe task branch. Use `/banana restart`.")
         return state
+
+    @staticmethod
+    def _assert_approved(issue, state):
+        if state["approved"] and state["approved"] != issue_digest(issue):
+            raise Interrupted("blocked", "The issue title or description changed after a maintainer approved it. "
+                                         "Review the edit, then use `/banana resume` to approve the current text.")
 
     def _create_branch(self, state):
         target = self.config.target_repository
@@ -434,7 +449,11 @@ class TaskRunner:
             raise BranchMoved("The task branch changed after the checks passed. Review it, then resume.")
         files = workspace.changed_files(base)
         title, body, _ = self.describe_pull(model, self.config.target_repository, workspace.diff(base), files)
-        self._fresh()
+        issue = self.forge.issue(self.number)
+        state = self._fresh()
+        self._assert_approved(issue, state)
+        if head != state["checkpoint"] or self.forge.branch_sha(self.config.target_repository, branch) != head:
+            raise BranchMoved("The task branch changed after the checks passed. Review it, then resume.")
         self.pulse("Opening the pull request")  # a stop or new guidance sent meanwhile wins
         checks = "\n".join(f"- `{' '.join(command)}`" for command in self.config.checks)
         body += (f"\n\n---\n**Checks:** on a clean checkout of `{head[:12]}`, `git diff --check` and every "
@@ -507,4 +526,3 @@ class TaskRunner:
         except (ForgeError, RuntimeError) as error:
             self.log(f"The task was saved as {outcome}, but the issue could not be updated: {error}")
         return outcome
-

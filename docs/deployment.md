@@ -21,7 +21,16 @@ Protect the target's default branch: require reviews and CI, and don't enable au
 
 On GitHub, use a fine-grained token for a dedicated bot account (Contents, Issues and Pull requests read/write, Metadata read), or a GitHub App installation token generated in an earlier step (`actions/create-github-app-token`). Installation tokens last an hour, so keep `limits.max_minutes` under about 45. The default `GITHUB_TOKEN` usually cannot write to a second repository and cannot start further workflows.
 
-On Forgejo, use a bot account's access token with repository and issue read/write scope, added as a collaborator with write access to both repositories.
+On Forgejo, use a dedicated bot account's access token with repository and issue
+read/write scope, and give that bot **Admin access to both repositories**.
+Forgejo lets an ordinary collaborator query only its own permission; repository
+Admin access is required to verify the permission of the person issuing a
+command. Instance administrator access is not required. Command authors still
+need only write access to both repositories. The bot's repository Admin role
+also permits managing collaborators and protections, so keep its token on a
+trusted runner and outside the coding sandbox. A write-only bot is refused with
+a setup error; BananaVibe does not infer authorization from collaborator or
+assignee membership.
 
 Add one secret per `api_key_env` in the configuration, and pass each in the workflow step's `env`, as the examples show.
 
@@ -44,6 +53,12 @@ The example skips the job for comments that aren't commands and for people with 
 
 The runner reaches the gateway's control port on `127.0.0.1`, so the job must run on the Docker host (host mode), not inside a job container.
 
+The runner must support Docker's internal bridge, IPv4 gateway inhibition and
+per-container IPv6 disable sysctls. BananaVibe explicitly creates and inspects
+an IPv4-only task network and disables IPv6 in the agent and checker; it refuses
+unsafe or unreadable network settings. This also applies when the daemon enables
+IPv6 by default. The trusted gateway keeps its normal provider egress.
+
 ## Concurrency
 
 Don't add a workflow `concurrency` group that cancels runs: a stop command must reach a running task. Leases in the state branch make sure only one runner works on an issue. A command that arrives while a task runs is picked up by that runner within `poll_seconds`.
@@ -53,5 +68,10 @@ Don't add a workflow `concurrency` group that cancels runs: a stop command must 
 The scheduled trigger is a watchdog: it marks tasks whose runner vanished (a lost runner or a hard timeout) as interrupted. It reads all task records with one Git fetch, and hourly is enough because `/banana status` checks that issue's task at once, and `/banana start` or `resume` restarts a task whose runner vanished.
 
 Every decision is logged in the job, and the Action sets `outcome` and `issue` outputs. Only a failed task fails the job; blocked and paused tasks are waiting for a person, not errors.
+
+Size the disposable runner's disk for the configured number of concurrent
+tasks. `max_workspace_mb` is checked when saving checkpoints; it is not a
+filesystem quota on each write. Verify the real bot permissions, provider/model
+access and allowlist on the chosen runner before enabling maintainer commands.
 
 To remove BananaVibe, stop active tasks, delete the workflow, then revoke the token. Task branches, PRs and the state branch stay for you to review and delete. For off-site copies of task data, see [backups](backups.md).

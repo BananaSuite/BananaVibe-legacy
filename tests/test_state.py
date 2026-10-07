@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,31 @@ def test_state_branch_is_an_orphan_without_workflows(forge, store):
     assert files == ["README.md"]
     store.ensure()  # idempotent
     assert forge.branch_sha(forge.config.control_repository, "bananavibe-state") == head
+
+
+def test_state_branch_never_uses_or_rewrites_the_default_branch(forge, store):
+    # base_branch may be a release branch, so configuration parsing alone
+    # cannot know that state_branch is the control repository's default.
+    store.config = replace(store.config, state_branch="main", base_branch="release")
+    original = forge.branch_sha(forge.config.control_repository, "main")
+    with pytest.raises(StateError, match="default branch"):
+        store.ensure()
+    with pytest.raises(StateError, match="default branch"):
+        store.make_orphan()
+    with pytest.raises(StateError, match="default branch"):
+        store.mutate(3, lambda _: new_task(store.config, 3))
+    assert forge.branch_sha(forge.config.control_repository, "main") == original
+
+
+@pytest.mark.parametrize("metadata", [None, [], {}, {"default_branch": None}, {"default_branch": ""}])
+def test_state_writes_fail_closed_without_default_branch_metadata(forge, store, metadata):
+    forge.repo = lambda _: metadata
+    with pytest.raises(StateError, match="could not be determined"):
+        store.ensure()
+    with pytest.raises(StateError, match="could not be determined"):
+        store.make_orphan()
+    with pytest.raises(StateError, match="could not be determined"):
+        store.mutate(3, lambda _: new_task(store.config, 3))
 
 
 def test_compare_and_swap_mutation_and_claim(forge, store):
@@ -76,6 +102,47 @@ def test_legacy_record_without_new_fields_is_normalized(forge, store):
 def test_record_for_another_issue_is_rejected(forge, store):
     store.ensure()
     forge.put_content(store.path(3), json.dumps(new_task(forge.config, 4)).encode())
+    with pytest.raises(StateError):
+        store.read(3)
+
+
+@pytest.mark.parametrize("changes", [
+    {"schema": True}, {"issue": True}, {"task_id": "another-task"}, {"model": []}, {"runner": {}},
+    {"request": "3"}, {"generation": 0}, {"iterations": -1}, {"status_comment": True},
+    {"lease_until": "later"}, {"lease_until": float("nan")}, {"lease_until": float("inf")},
+    {"lease_until": 10**1000}, {"guidance": "bad"}, {"guidance": [{"author": "m", "text": None}]},
+    {"guidance": [{"author": "m", "text": "x" * 200001}]}, {"events": [3]},
+])
+def test_malformed_record_fields_are_rejected_before_commands_use_them(forge, store, changes):
+    store.ensure()
+    forge.put_content(store.path(3), json.dumps({**new_task(forge.config, 3), **changes}).encode())
+    with pytest.raises(StateError):
+        store.read(3)
+    with pytest.raises(StateError):
+        store.all()
+
+
+def test_corrupt_json_is_never_silently_omitted_from_a_backup(forge, store):
+    store.ensure()
+    forge.put_content(store.path(3), b"{broken")
+    with pytest.raises(StateError, match="unreadable"):
+        store.read(3)
+    with pytest.raises(StateError, match="unreadable"):
+        store.all()
+
+
+def test_record_size_is_enforced_even_when_api_metadata_understates_it(forge, store):
+    from bananavibe.state import MAX_BYTES
+    import base64
+    forge.content = lambda _: {"type": "file", "size": 1, "sha": "revision",
+                               "content": base64.b64encode(b" " * (MAX_BYTES + 1)).decode()}
+    with pytest.raises(StateError, match="too large"):
+        store.read(3)
+
+
+@pytest.mark.parametrize("content", ["%not-base64", "bm90LWpzb24=", [], 1])
+def test_unreadable_contents_api_records_have_a_safe_error(forge, store, content):
+    forge.content = lambda _: {"type": "file", "size": 1, "sha": "revision", "content": content}
     with pytest.raises(StateError):
         store.read(3)
 

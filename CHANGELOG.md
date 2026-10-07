@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+- Correct Forgejo setup requirements: the dedicated bot needs repository Admin
+  access to check other users' permissions. Refuse insufficient access with a
+  clear setup error without falling back to membership-based authorization.
+- Recheck issue approval throughout a run and immediately before publication;
+  approved edits restart the agent with the current issue text.
+- Recheck the task branch after generating the PR description, so a concurrent
+  push cannot publish an unchecked commit.
+- Prevent state creation, writes, migration and recovery from targeting the
+  control repository's default branch.
+- Reject malformed or oversized task records explicitly, including during
+  backup listing and recovery, instead of dropping records from a snapshot.
+- Safely render unusual filenames in fallback PR descriptions and reject
+  malformed URL hosts, ports and control characters during configuration checks.
+- Retry transient OpenCode release downloads with checksum, size and time
+  limits; install the verified binary atomically.
+- Remove private gateway credentials even if Docker shutdown operations fail.
+- Include sandbox sources, docs, workflows and test fixtures in source packages.
+- Enforce total forge/provider response deadlines across bounded DNS, TCP and
+  TLS, even when headers or bodies arrive slowly; release request deadline
+  workers before retries and on success or failure.
+- Reject invalid Unicode, non-finite numbers and excessive nesting in provider
+  JSON with a controlled decode error.
+- Require a security-fixed source distribution builder (setuptools 83+).
+
 ## 1.6.0
 
 A rewrite of the preview release for production use and open-source release.

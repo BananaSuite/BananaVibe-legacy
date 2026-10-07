@@ -215,6 +215,50 @@ def test_issue_edited_after_approval_blocks_until_resumed(forge, store, controll
     assert run(forge, store) == "complete"
 
 
+def test_issue_edited_while_working_is_not_published(forge, store, controller):
+    def script(engine, text):
+        complete_change(engine, text)
+        forge.issues[3]["body"] = "Edited without maintainer approval"
+    FakeEngine.script = script
+    assert run(forge, store) == "blocked"
+    assert not forge.pulls
+    state = store.read(3)[0]
+    assert forge.show(state["branch"], "app.py") == "answer = 2"
+    assert "changed after a maintainer approved it" in state["reason"]
+
+
+def test_issue_approved_while_working_restarts_with_the_current_text(forge, store, controller):
+    calls = []
+
+    def script(engine, text):
+        calls.append(text)
+        complete_change(engine, text)
+        if len(calls) == 1:
+            forge.issues[3]["body"] = "PRIVATE: current approved instructions"
+            controller.command(3, Command("resume"), "maintainer", "approve-during-run")
+    FakeEngine.script = script
+    assert run(forge, store) == "complete"
+    assert FakeEngine.sessions == 2
+    assert "current approved instructions" in FakeEngine.prompts[-1]
+
+
+def test_heartbeat_detects_an_unapproved_issue_edit(forge, store, controller):
+    runner = TaskRunner(forge, store, 3, engine_factory=FakeEngine, image_factory=lambda *_: "image",
+                        describe_pull=summary, log=lambda *_: None)
+    runner.state = store.claim(3, runner.runner)
+    forge.issues[3]["body"] = "Edited while the agent is busy"
+
+    class TickOnce:
+        def wait(self, timeout):
+            return False
+    runner.stopping = TickOnce()
+    runner._heartbeat()
+    from bananavibe.runner import Interrupted
+    with pytest.raises(Interrupted) as stopped:
+        runner.pulse()
+    assert stopped.value.outcome == "blocked"
+
+
 def test_protected_changes_are_discarded_and_explained(forge, store, controller):
     calls = {"n": 0}
 
@@ -394,6 +438,32 @@ def test_guidance_arriving_while_describing_is_applied_before_publishing(forge, 
     assert runner.run() == "complete"
     assert "One more thing" in FakeEngine.prompts[1] and len(forge.pulls) == 1
     assert "/banana resume" not in forge.posts[-1]
+
+
+def test_issue_edited_while_describing_prevents_publication(forge, store, controller):
+    def late_summary(model, repository, diff, files):
+        forge.issues[3]["body"] = "Changed during the summary request"
+        return summary(model, repository, diff, files)
+    runner = TaskRunner(forge, store, 3, engine_factory=FakeEngine, image_factory=lambda *_: "image",
+                        describe_pull=late_summary, log=lambda *_: None)
+    assert runner.run() == "blocked"
+    assert not forge.pulls
+
+
+def test_branch_changed_while_describing_prevents_publication(forge, store, controller, tmp_path):
+    def late_summary(model, repository, diff, files):
+        state = store.read(3)[0]
+        work = tmp_path / "during-summary"
+        git("clone", "-q", "-b", state["branch"], str(forge.target), str(work))
+        (work / "app.py").write_text("answer = 99\n")
+        git("commit", "-qam", "manual during summary", cwd=work)
+        git("push", "-q", "origin", state["branch"], cwd=work)
+        return summary(model, repository, diff, files)
+    runner = TaskRunner(forge, store, 3, engine_factory=FakeEngine, image_factory=lambda *_: "image",
+                        describe_pull=late_summary, log=lambda *_: None)
+    assert runner.run() == "failed"
+    assert not forge.pulls
+    assert "changed after the checks passed" in store.read(3)[0]["reason"]
 
 
 def test_guidance_arriving_after_publication_is_reported(forge, store, controller):

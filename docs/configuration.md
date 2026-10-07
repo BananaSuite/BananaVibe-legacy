@@ -35,6 +35,11 @@ working installation. Check the workflow log for them.
 | `ignore` | `[]` | Extra untracked patterns never to commit, added to the built-in list of build and test caches (`__pycache__/`, `.pytest_cache/`, `node_modules/`, …). |
 | `image` | `""` | Sandbox image. Empty means build it locally from this release (cached per runner). Set it to a published digest, such as `ghcr.io/bananasuite/bananavibe-sandbox@sha256:…`, to skip the build on hosted runners. |
 
+Local sandbox builds require the Action checkout or the complete source
+distribution, which include `Dockerfile.sandbox` and its build inputs. A
+wheel-only installation must configure a prebuilt `image`; without one it
+refuses startup with a setup error.
+
 ## Models
 
 Each `[models.ALIAS]` table is one model maintainers may select with `/banana model ALIAS`. `default_model` names the alias new tasks use.

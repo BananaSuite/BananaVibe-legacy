@@ -30,6 +30,7 @@ Work is saved on the task branch in every state. `resume` always continues from 
 
 - `/banana answer TEXT` while running is delivered to the agent in the same session at its next safe point.
 - `/banana model ALIAS` switches models at the next safe point with a fresh session on the saved work.
+- Issue edits are detected by the heartbeat and checked again before publication. An unapproved edit blocks the run; approving edited text with `resume` starts a fresh session using the current text and saved work.
 - `/banana stop` stops at the next safe point, within `poll_seconds` plus the current operation, and saves a checkpoint.
 - A command recorded while a run is finishing is not lost: the runner continues, or tells you to `resume` if its time is up.
 

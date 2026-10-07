@@ -8,6 +8,7 @@ cannot provide.
 
 - Configuration comes only from the control repository's default branch, as checked out by the workflow. The workflow's own repository overrides any `control_repository` in the file.
 - Commands must be a whole comment, from someone with **write access to both** repositories. Bots, pull-request comments and edited comments are ignored. Unauthorized commands get no reply, so the bot can't be used to spam.
+- Forgejo requires the dedicated bot to have repository Admin access to query other people's permissions. This grants the controller additional repository-management authority; the token stays outside the sandbox on a trusted runner. It does not require instance administrator access or grant command authors additional rights. See [deployment](deployment.md#credentials).
 - The agent's instructions are the issue title and body **as approved** by a maintainer, plus guidance given with `/banana answer`. Other comments never reach it. If the issue text changes after approval, the task stops until a maintainer resumes it.
 
 ## What the sandbox can reach
@@ -19,7 +20,7 @@ runner (controller)      holds BANANAVIBE_TOKEN, model keys, Git metadata
                        └ checker container    clean export + fresh /state
 ```
 
-- The agent and checker containers are on an internal Docker network with no route out and no route to the host. Their only peer is the gateway.
+- The agent and checker use an explicitly IPv4-only internal Docker bridge, with its IPv4 host gateway inhibited. BananaVibe inspects the bridge before starting the agent and before each checker, and refuses unreadable or unsafe network settings. Both untrusted containers also disable IPv6 on all existing and future interfaces, including loopback and link-local addresses. Their only reachable peer is the gateway. The trusted gateway retains ordinary provider egress, including IPv6.
 - The gateway (`sandbox/gateway.py`) accepts the task token for inference with the configured model only, up to `max_calls`, until the run's deadline. It relays provider responses, with the real key redacted from errors.
 - Its egress proxy allows public hosts in `network.allow` on ports 443 (CONNECT) and 80. It resolves DNS once and refuses private, loopback, link-local, carrier-grade NAT and metadata addresses.
 - The controller reaches OpenCode's API only through the gateway's control port, bound to `127.0.0.1` and protected by a separate secret.

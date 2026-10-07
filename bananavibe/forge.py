@@ -47,7 +47,10 @@ class Forge:
 
     def _identify(self):
         try:
-            return self.call("GET", "/user", what="read the bot identity")
+            data = self.call("GET", "/user", what="read the bot identity")
+            if not isinstance(data, dict) or not isinstance(data.get("login"), str) or not data["login"]:
+                raise Unavailable("The forge returned an invalid bot identity.")
+            return data
         except ForgeError as error:
             # GitHub App installation tokens have no user profile but can
             # still list their repositories; confirm that before trusting it.
@@ -80,7 +83,10 @@ class Forge:
             raise (Conflict if status in conflict else ForgeError)(status, what) from None
         except httpclient.Unreachable as error:
             raise Unavailable(f"The forge API could not be reached: {error}") from None
-        return response.json()
+        try:
+            return response.json()
+        except (ValueError, UnicodeError):
+            raise Unavailable("The forge returned an unreadable API response.") from None
 
     def pages(self, path, params=None, *, maximum=50, what="list items", complete=True):
         """Every item of a list; with complete=False, the first `maximum` pages are enough."""
@@ -105,8 +111,20 @@ class Forge:
     def permission(self, repository, login):
         if not login or "/" in login:
             return "none"
-        data = self.call("GET", f"/repos/{repository}/collaborators/{quote(login, safe='')}/permission",
-                         missing=True, what="read collaborator permissions")
+        try:
+            data = self.call("GET", f"/repos/{repository}/collaborators/{quote(login, safe='')}/permission",
+                             missing=True, what="read collaborator permissions")
+        except ForgeError as error:
+            if not self.github and error.status == 403:
+                # Forgejo allows a collaborator to read only their own role.
+                # Checking command authors requires repository-admin access;
+                # membership/assignee lists cannot establish write permission.
+                raise RuntimeError(
+                    "Forgejo refused collaborator permission checks. Give the dedicated bot Admin access "
+                    "to both the control and target repositories, with repository and issue token scopes. "
+                    "Instance administrator access is not required."
+                ) from None
+            raise
         return str((data or {}).get("permission") or "none")
 
     def authorized(self, login):

@@ -25,6 +25,11 @@ jobs:
         run: |
           version=$(python3 -c 'import bananavibe; print(bananavibe.__version__)')
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - name: Normalize the sandbox image name
+        id: image
+        run: |
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          printf 'name=ghcr.io/%s/bananavibe-sandbox\n' "$owner" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -40,17 +45,17 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/bananavibe-sandbox:${{ github.ref_name }}
+            ${{ steps.image.outputs.name }}:${{ github.ref_name }}
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/bananavibe-sandbox
+          subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
         run: |
-          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          notes=$(printf 'Sandbox image: `ghcr.io/%s/bananavibe-sandbox@%s`\n\nSee CHANGELOG.md and UPGRADING.md.' "$owner" "$DIGEST")
+          notes=$(printf 'Sandbox image: `%s@%s`\n\nSee CHANGELOG.md and UPGRADING.md.' "$IMAGE_NAME" "$DIGEST")
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$notes" --verify-tag

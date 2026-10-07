@@ -50,3 +50,7 @@ jobs:
       - run: python -m pip install pytest==9.1.1
       - name: End-to-end task in Docker
         run: python -m pytest -q -m docker tests/test_e2e_docker.py
+      - name: Real Forgejo permissions, state and pull requests
+        run: |
+          docker info >/dev/null
+          python -m pytest -q -m docker tests/test_forgejo_docker.py

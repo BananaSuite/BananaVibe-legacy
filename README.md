@@ -24,7 +24,10 @@ If the issue is edited after a maintainer approved it, the task pauses until som
 4. Validate locally: `python3 -m bananavibe check-config --config .bananavibe.toml` (from a checkout of this repository).
 5. Commit both files to the default branch, open an issue describing a change, and watch the status comment.
 
-Forgejo works the same way with [`examples/forgejo.yml`](examples/forgejo.yml) and a host runner. See [deployment](docs/deployment.md).
+Forgejo uses [`examples/forgejo.yml`](examples/forgejo.yml) and a host runner.
+Its dedicated bot needs repository **Admin** access to both repositories so it
+can verify command authors' permissions; authors need only write access.
+See [deployment](docs/deployment.md).
 
 ## Commands
 
@@ -57,6 +60,7 @@ BananaVibe 1.6 is a rewrite of the preview release (commit `7dde06e`). Change th
 - [Security model](docs/security-model.md): boundaries and what they do not cover
 - [Backups](docs/backups.md): optional encrypted off-site copies
 - [Development](docs/development.md): architecture and running the tests
+- [Release verification](docs/readiness.md): advertised features, failure coverage and deployment evidence
 
 ## History, ownership and license
 

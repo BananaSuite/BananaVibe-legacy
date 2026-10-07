@@ -90,10 +90,17 @@ def sanitize(title, body):
 
 
 def fallback(repository, files):
-    listed = "\n".join(f"- `{name}`" for name in files[:100])
+    # Git allows newlines, backticks and forge markup in filenames. Keep a
+    # filename on one line, and choose a code delimiter it cannot break out of.
+    def filename(name):
+        text = json.dumps(name, ensure_ascii=False)[1:-1].replace("@", "@\u200b")
+        ticks = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+        return f"{ticks} {text} {ticks}" if "`" in text else f"{ticks}{text}{ticks}"
+
+    listed = "\n".join(f"- {filename(name)}" for name in files[:100])
     more = f"\n- … and {len(files) - 100} more" if len(files) > 100 else ""
-    return (f"Maintenance change for {repository.split('/')[-1]}",
-            f"This draft changes {len(files)} file{'s' if len(files) != 1 else ''}:\n\n{listed}{more}")
+    return sanitize(f"Maintenance change for {repository.split('/')[-1]}",
+                    f"This draft changes {len(files)} file{'s' if len(files) != 1 else ''}:\n\n{listed}{more}")
 
 
 def describe(model, repository, diff, files):

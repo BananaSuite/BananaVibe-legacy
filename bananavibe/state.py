@@ -10,6 +10,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import re
 import tempfile
 import time
@@ -67,12 +68,56 @@ class StateError(RuntimeError):
     pass
 
 
+def validate(state, repository, number=None):
+    """Normalize compatible records and reject malformed data before using it.
+
+    The state branch is editable by maintainers and can also be damaged by a
+    interrupted manual restore. A bad record must fail explicitly, rather than
+    crashing a command midway through a mutation or disappearing from a backup.
+    """
+    if (not isinstance(state, dict) or type(state.get("schema")) is not int or state["schema"] != SCHEMA
+            or type(state.get("issue")) is not int or state["issue"] < 1
+            or (number is not None and state["issue"] != number)):
+        raise StateError("The saved task record is invalid.")
+    state = normalize(state)
+    strings = ("task_id", "target_repository", "base_branch", "model", "status", "desired", "operation", "branch",
+               "base_sha", "checkpoint", "runner", "pr_url", "reason", "phase", "approved", "pushing")
+    if any(not isinstance(state.get(key), str) for key in strings):
+        raise StateError("The saved task record has invalid text fields.")
+    if state["task_id"] != task_id(repository, state["issue"]):
+        raise StateError("The saved task record has a different task identity.")
+    counters = ("generation", "request", "iterations", "status_comment")
+    if any(type(state[key]) is not int or state[key] < (1 if key == "generation" else 0) for key in counters):
+        raise StateError("The saved task record has invalid counters.")
+    lease = state["lease_until"]
+    if type(lease) not in {int, float} or not 0 <= lease <= 10**12 or not math.isfinite(lease):
+        raise StateError("The saved task record has an invalid lease.")
+    if (not isinstance(state["events"], list) or len(state["events"]) > MAX_EVENTS
+            or any(not isinstance(item, str) for item in state["events"])):
+        raise StateError("The saved task record has invalid command history.")
+    guidance = state["guidance"]
+    if (not isinstance(guidance, list) or len(guidance) > MAX_GUIDANCE
+            or any(not isinstance(item, dict) or not isinstance(item.get("text"), str)
+                   or not isinstance(item.get("author"), str) for item in guidance)
+            or sum(len(item["text"]) for item in guidance) > MAX_GUIDANCE_CHARS):
+        raise StateError("The saved task record has invalid maintainer guidance.")
+    return state
+
+
 class StateStore:
     def __init__(self, forge, *, clock=time.time, sleep=time.sleep):
         self.forge, self.config, self.clock, self.sleep = forge, forge.config, clock, sleep
 
     def path(self, number):
         return f"{DIRECTORY}/{task_id(self.config.control_repository, number)}.json"
+
+    def check_branch(self):
+        info = self.forge.repo(self.config.control_repository)
+        default = info.get("default_branch") if isinstance(info, dict) else None
+        if not isinstance(default, str) or not default:
+            raise StateError("The control repository's default branch could not be determined; refusing state changes.")
+        if default == self.config.state_branch:
+            raise StateError("state_branch cannot be the control repository's default branch.")
 
     def ensure(self):
         """Create the state branch as an orphan branch holding only task records.
@@ -81,10 +126,9 @@ class StateStore:
         not trigger the repository's push workflows.
         """
         repository = self.config.control_repository
+        self.check_branch()
         if self.forge.branch_sha(repository, self.config.state_branch):
             return
-        if self.forge.repo(repository).get("default_branch") == self.config.state_branch:
-            raise StateError("state_branch cannot be the control repository's default branch.")
         with tempfile.TemporaryDirectory(prefix="bananavibe-state-") as root:
             git = Git(f"{root}/state.git", token=self.forge.token, username=self.forge.login)
             blob = git.out("hash-object", "-w", "--stdin", input=STATE_README.decode())
@@ -105,6 +149,7 @@ class StateStore:
         Returns False when the branch already holds only task records.
         """
         repository, name = self.config.control_repository, self.config.state_branch
+        self.check_branch()
         if not self.forge.branch_sha(repository, name):
             raise StateError(f"The state branch {name} does not exist yet; nothing to convert.")
         if any(state["runner"] and state["lease_until"] > self.clock() for state in self.all()):
@@ -137,12 +182,22 @@ class StateStore:
             return None, None
         if not isinstance(record, dict) or record.get("type", "file") != "file":
             raise StateError("The task record is not a file.")
-        if int(record.get("size") or 0) > MAX_BYTES:
-            raise StateError("The task record is too large.")
-        data = json.loads(base64.b64decode(record.get("content") or ""))
-        if not isinstance(data, dict) or data.get("issue") != int(number) or data.get("schema") != SCHEMA:
-            raise StateError("The saved task record is invalid.")
-        return normalize(data), record["sha"]
+        try:
+            if int(record.get("size") or 0) > MAX_BYTES:
+                raise StateError("The task record is too large.")
+            encoded = record.get("content") or ""
+            if not isinstance(encoded, str) or len(encoded) > (MAX_BYTES * 4 // 3 + 4) * 2:
+                raise StateError("The task record is too large or has invalid encoding.")
+            raw = base64.b64decode("".join(encoded.split()), validate=True)
+            if len(raw) > MAX_BYTES:
+                raise StateError("The task record is too large.")
+            data = json.loads(raw)
+            sha = record["sha"]
+            if not isinstance(sha, str) or not sha:
+                raise StateError("The task record has no revision.")
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise StateError("The saved task record is unreadable.") from None
+        return validate(data, self.config.control_repository, int(number)), sha
 
     def mutate(self, number, change):
         """Apply change(copy) with compare-and-swap; None or no-op leaves it untouched.
@@ -151,6 +206,7 @@ class StateStore:
         failed transiently: if it did land after all, the retry re-reads it,
         and every change function is safe to apply to its own result.
         """
+        self.check_branch()
         transient = 0
         for attempt in range(8):
             old, sha = self.read(number)
@@ -210,7 +266,7 @@ class StateStore:
                 return []
             git.fetch(self.forge.clone_url(self.config.control_repository),
                       f"refs/heads/{self.config.state_branch}", depth=1)
-            files = git.read_files("FETCH_HEAD", DIRECTORY + "/", limit=MAX_BYTES)
+            files = git.read_files("FETCH_HEAD", DIRECTORY + "/", limit=MAX_BYTES, strict=True)
         records = []
         for path, raw in sorted(files.items()):
             if not path.endswith(".json"):
@@ -218,9 +274,11 @@ class StateStore:
             try:
                 data = json.loads(raw)
             except ValueError:
-                continue
-            if isinstance(data, dict) and data.get("schema") == SCHEMA and type(data.get("issue")) is int:
-                records.append(normalize(data))
+                raise StateError("An unreadable task record exists on the state branch.") from None
+            state = validate(data, self.config.control_repository)
+            if path != self.path(state["issue"]):
+                raise StateError("A task record is stored under a different task identity.")
+            records.append(state)
         return records
 
 

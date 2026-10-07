@@ -70,4 +70,6 @@ Each snapshot is an independent commit on `banana-backups/bananavibe/SERIES/SNAP
 
 The default maximum is 512 MiB per compressed package, configurable up to 1024 MiB, and the same limit caps the archived transcripts. A repository with many task branches or long issue histories fails the backup rather than truncating it; archive old tasks first. Encryption prevents efficient deduplication, so retained full snapshots consume storage, and forge repository and push quotas still apply. Retention removes branch references; the hosting provider controls when unreachable objects and reflogs are garbage-collected, so space may not shrink immediately.
 
+Malformed, oversized or nonregular task-state records also stop the backup. Inspect and repair the state branch before retrying; corrupted tasks are never silently omitted from a snapshot. Invalid archive manifests fail before review files are published, and a failed review copy removes its incomplete new directory.
+
 Allow staging space for the archive, encryption, and a verification download. Downloads reserve three times the configured limit plus 128 MiB; upload needs additional package-sized working space. A backup in the same forge or account does not replace an independent offline copy and a tested recovery key.

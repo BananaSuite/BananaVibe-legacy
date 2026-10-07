@@ -30,11 +30,25 @@ from banana_backup.store import Store
 
 from .config import Config, ConfigurationError, branch
 from .forge import Forge
-from .state import SCHEMA, TASK_BRANCH, StateStore, task_id
+from .state import SCHEMA, TASK_BRANCH, StateError, StateStore, task_id, validate
 
 PAYLOAD = {"configuration.toml", "tasks.json", "issues.json", "control.bundle", "target.bundle"}
 REQUIRED = {"configuration.toml", "control.bundle", "tasks.json", "issues.json"}
 COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _manifest(metadata):
+    if (not isinstance(metadata, dict) or type(metadata.get("schema")) is not int or metadata["schema"] != 1
+            or metadata.get("product") != "BananaVibe" or not isinstance(metadata.get("files"), dict)
+            or not REQUIRED <= set(metadata["files"]) <= PAYLOAD
+            or any(not isinstance(metadata.get(key), str)
+                   for key in ("server_url", "control_repository", "target_repository"))):
+        raise ValueError("The BananaVibe archive has an invalid manifest.")
+    for info in metadata["files"].values():
+        if (not isinstance(info, dict) or type(info.get("bytes")) is not int or info["bytes"] < 0
+                or not isinstance(info.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", info["sha256"])):
+            raise ValueError("The BananaVibe archive has an invalid file manifest.")
+    return metadata
 
 
 def _git_settings(forge, repository, maximum):
@@ -43,6 +57,10 @@ def _git_settings(forge, repository, maximum):
 
 
 def _valid_record(forge, state):
+    try:
+        validate(state, forge.config.control_repository)
+    except StateError:
+        return False
     return (type(state.get("issue")) is int and state["issue"] > 0
             and state.get("task_id") == task_id(forge.config.control_repository, state["issue"])
             and state.get("target_repository") == forge.config.target_repository
@@ -155,17 +173,20 @@ def restore_package(package, destination, *, maximum=1024):
                 (work / member.name).chmod(0o600)
         if "metadata.json" not in seen:
             raise ValueError("The BananaVibe archive has no manifest.")
-        metadata = json.loads((work / "metadata.json").read_text())
-        if (metadata.get("schema") != 1 or metadata.get("product") != "BananaVibe"
-                or set(metadata.get("files", {})) != seen - {"metadata.json"} or not REQUIRED <= seen):
+        metadata = _manifest(json.loads((work / "metadata.json").read_text()))
+        if set(metadata["files"]) != seen - {"metadata.json"}:
             raise ValueError("The BananaVibe archive does not match its manifest.")
         for filename, info in metadata["files"].items():
             if (work / filename).stat().st_size != info.get("bytes") or digest(work / filename) != info.get("sha256"):
                 raise ValueError("The BananaVibe archive failed its integrity check.")
         destination.mkdir(mode=0o700)  # exclusive: fails if something raced us
-        for filename in seen:
-            shutil.copyfile(work / filename, destination / filename)
-            (destination / filename).chmod(0o600)
+        try:
+            for filename in seen:
+                shutil.copyfile(work / filename, destination / filename)
+                (destination / filename).chmod(0o600)
+        except BaseException:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
     return {"outcome": "restored for review", "directory": str(destination),
             "next": "Review the configuration and transcripts, recreate runner secrets, and use "
                     "`restore-state` only with the BananaVibe workflow disabled."}
@@ -174,7 +195,7 @@ def restore_package(package, destination, *, maximum=1024):
 def restore_state(forge, recovery, confirm_repository, *, git_factory=Git, clock=time.time):
     """Recreate missing checkpoint branches and write records back paused."""
     recovery = directory(recovery)
-    metadata = json.loads(private_bytes(recovery / "metadata.json", 65536))
+    metadata = _manifest(json.loads(private_bytes(recovery / "metadata.json", 65536)))
     if (confirm_repository != forge.config.control_repository
             or metadata.get("control_repository") != confirm_repository
             or metadata.get("target_repository") != forge.config.target_repository
@@ -182,12 +203,13 @@ def restore_state(forge, recovery, confirm_repository, *, git_factory=Git, clock
         raise ValueError("Confirm the original issue repository, with a matching forge and target configuration.")
     for name in ("tasks.json", "target.bundle"):
         info = metadata["files"].get(name)
-        if info and digest(recovery / name) != info["sha256"]:
+        if info and ((recovery / name).stat().st_size != info["bytes"] or digest(recovery / name) != info["sha256"]):
             raise ValueError(f"The recovered {name} was modified after restore; refusing to apply it.")
     states = json.loads(private_bytes(recovery / "tasks.json", 64 * 1024 * 1024))
     if not isinstance(states, list):
         raise ValueError("Invalid task archive.")
     store, current, missing, numbers = StateStore(forge), {}, {}, set()
+    store.check_branch()
     for state in states:
         number = state.get("issue") if isinstance(state, dict) else None
         if not isinstance(state, dict) or state.get("schema") != SCHEMA or not _valid_record(forge, state) \

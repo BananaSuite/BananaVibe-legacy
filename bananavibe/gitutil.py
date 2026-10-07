@@ -64,7 +64,7 @@ class Git:
         return self.run("fetch", "--quiet", "--no-tags", *(["--depth", str(depth)] if depth else []),
                         url, refspec, timeout=timeout)
 
-    def read_files(self, revision, prefix, *, limit=512 * 1024):
+    def read_files(self, revision, prefix, *, limit=512 * 1024, strict=False):
         """Return {path: bytes} for regular files under prefix at revision."""
         listing = self.run("ls-tree", "-r", "-z", "--full-tree", "-l", revision, "--", prefix, text=False).stdout
         wanted = []
@@ -73,6 +73,8 @@ class Git:
                 continue
             info, path = entry.split(b"\t", 1)
             mode, kind, oid, size = info.split()
+            if strict and (mode != b"100644" or kind != b"blob" or int(size) > limit):
+                raise GitError("The task state includes an oversized or nonregular file; inspect the state branch.")
             if mode == b"100644" and kind == b"blob" and int(size) <= limit:
                 wanted.append((path.decode(), oid.decode()))
         if not wanted:

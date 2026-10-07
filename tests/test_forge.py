@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from bananavibe import httpclient
-from bananavibe.forge import Conflict, Forge, ForgeError
+from bananavibe.forge import Conflict, Forge, ForgeError, Unavailable
 from fakes import make_config
 
 
@@ -27,6 +27,7 @@ class API(BaseHTTPRequestHandler):
         elif route.endswith("/installation/repositories"):
             status, result = server.installation_status, {"repositories": []}
         elif "/collaborators/" in route:
+            status = server.permission_status
             result = {"permission": "write" if "/maintainer/" in route else "read"}
         elif route.endswith("/limited"):
             self.send_response(403)
@@ -70,6 +71,7 @@ def api():
     server = ThreadingHTTPServer(("127.0.0.1", 0), API)
     server.calls, server.pulls = [], []
     server.user_status, server.installation_status = 200, 200
+    server.permission_status = 200
     server.draft_unsupported = server.branch_exists = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
@@ -151,6 +153,23 @@ def test_bad_tokens_fail(api, kind, status):
     assert not any("/installation/" in call[1] for call in api.calls)
 
 
+@pytest.mark.parametrize("kind", ["forgejo", "github"])
+def test_permission_checks_fail_closed_with_provider_specific_setup_errors(api, kind):
+    api.permission_status = 403
+    forge = forge_for(api, kind)
+    if kind == "forgejo":
+        with pytest.raises(RuntimeError, match="Give the dedicated bot Admin access") as error:
+            forge.authorized("maintainer")
+        assert "Instance administrator access is not required" in str(error.value)
+        assert "secret-token" not in str(error.value)
+    else:
+        with pytest.raises(ForgeError) as error:
+            forge.authorized("maintainer")
+        assert error.value.status == 403
+    assert all(method == "GET" for method, *_ in api.calls)
+    assert not any(path.endswith("/assignees") or path.endswith("/collaborators") for _, path, *_ in api.calls)
+
+
 def test_client_never_follows_redirects_or_leaks_bodies(api):
     url = f"http://127.0.0.1:{api.server_port}"
     with pytest.raises(httpclient.HTTPError) as error:
@@ -175,3 +194,12 @@ def test_secondary_rate_limits_are_transient(api):
     with pytest.raises(ForgeError) as error:
         forge_for(api, "github").call("PUT", "/limited")
     assert error.value.status == 429
+
+
+@pytest.mark.parametrize("payload", [b"not json", b"[]", b"null", b'{"login": null}', b'{"login": ""}'])
+def test_invalid_identity_responses_fail_without_a_traceback_or_response_body(payload):
+    def transport(*_, **__):
+        return httpclient.Response(200, {}, payload)
+    with pytest.raises(Unavailable) as error:
+        Forge(make_config(), "secret-token", transport=transport)
+    assert "secret-token" not in str(error.value) and "not json" not in str(error.value)

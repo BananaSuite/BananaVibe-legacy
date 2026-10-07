@@ -135,3 +135,28 @@ def test_backups_use_the_workflow_repository(tmp_path, monkeypatch):
     monkeypatch.delenv("FORGEJO_REPOSITORY", raising=False)
     monkeypatch.setenv("GITHUB_REPOSITORY", "team/prompts")
     assert backups._load(configuration).control_repository == "team/prompts"
+
+
+@pytest.mark.parametrize("metadata", [[], None, {}, {"schema": 1, "product": "BananaVibe", "files": []},
+                                      {"schema": True, "product": "BananaVibe", "files": {}}])
+def test_malformed_manifests_fail_cleanly_without_publishing_review_files(tmp_path, metadata):
+    package = tmp_path / "malformed.tar.gz"
+    raw = json.dumps(metadata).encode()
+    with tarfile.open(package, "w:gz") as archive:
+        member = tarfile.TarInfo("metadata.json")
+        member.size = len(raw)
+        archive.addfile(member, io.BytesIO(raw))
+    with pytest.raises(ValueError, match="manifest"):
+        backups.restore_package(package, tmp_path / "review")
+    assert not (tmp_path / "review").exists()
+
+
+def test_interrupted_review_copy_removes_only_its_new_directory(fixture, tmp_path, monkeypatch):
+    package = export(fixture, tmp_path)
+
+    def failed_copy(*_, **__):
+        raise OSError("disk full")
+    monkeypatch.setattr(backups.shutil, "copyfile", failed_copy)
+    with pytest.raises(OSError, match="disk full"):
+        backups.restore_package(package, tmp_path / "review")
+    assert not (tmp_path / "review").exists()

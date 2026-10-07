@@ -141,13 +141,33 @@ class Engine:
 
     # Lifecycle
 
-    def _limits(self, memory_mb):
+    def _limits(self, memory_mb, *, disable_ipv6=True):
         uid, gid = (os.getuid(), os.getgid()) if os.getuid() else (65532, 65532)
-        return ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--pids-limit=512",
+        limits = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--pids-limit=512",
                 "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", str(self.config.limits.cpus),
                 "--user", f"{uid}:{gid}", "--ulimit", "fsize=268435456:268435456", "--ulimit", "nofile=4096:4096",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777", "--label", "org.bananavibe.task=" + self.name,
                 *self._task_label(), "--log-driver", "none"]
+        if disable_ipv6:
+            limits += ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+                       "--sysctl", "net.ipv6.conf.default.disable_ipv6=1"]
+        return limits
+
+    def _verify_internal_network(self):
+        """Refuse a bridge whose actual policy can expose host listeners."""
+        result = docker("network", "inspect", self.internal, check=False, timeout=30)
+        try:
+            networks = json.loads(result.stdout)
+            info = networks[0] if isinstance(networks, list) and len(networks) == 1 else {}
+        except ValueError:
+            info = {}
+        options = info.get("Options") if isinstance(info, dict) else None
+        if (result.returncode or not isinstance(info, dict) or info.get("Driver") != "bridge"
+                or info.get("Internal") is not True or info.get("EnableIPv6") is not False
+                or not isinstance(options, dict)
+                or options.get("com.docker.network.bridge.inhibit_ipv4") != "true"):
+            raise EngineError("The task bridge must be internal, IPv4-only and have no host IPv4 gateway. "
+                              "Docker returned an unsafe or unreadable network policy.")
 
     def _task_label(self):
         return ["--label", f"{TASK_LABEL}={self.task}"] if self.task else []
@@ -200,12 +220,13 @@ class Engine:
             "enabled_providers": ["task"], "permission": "allow", "autoupdate": False, "share": "disabled"})
         state = self._state_dir("agent-state")
 
-        docker("network", "create", "--internal", "-o", "com.docker.network.bridge.inhibit_ipv4=true",
+        docker("network", "create", "--internal", "--ipv6=false", "-o", "com.docker.network.bridge.inhibit_ipv4=true",
                *self._task_label(), self.internal)
+        self._verify_internal_network()
         docker("network", "create", "-o", "com.docker.network.bridge.enable_icc=false", *self._task_label(),
                self.outside)
         docker("create", "--name", self.gateway, "--network", self.outside, "--publish", "127.0.0.1::8082",
-               *self._limits(256), "--mount", f"type=bind,src={gateway_config},dst=/run/gateway.json,readonly",
+               *self._limits(256, disable_ipv6=False), "--mount", f"type=bind,src={gateway_config},dst=/run/gateway.json,readonly",
                "--entrypoint", "python3", self.image, "/opt/bananavibe/gateway.py", "/run/gateway.json")
         docker("network", "connect", "--alias", "gateway", self.internal, self.gateway)
         docker("start", self.gateway)
@@ -239,15 +260,23 @@ class Engine:
         raise EngineError("The coding engine did not become ready within three minutes.")
 
     def close(self):
-        if self.session and self.port:
-            try:
-                self.api("POST", f"/session/{self.session}/abort")
-            except EngineError:
-                pass
-        docker("rm", "--force", "--volumes", self.agent, self.agent + "-check", self.gateway, check=False, timeout=60)
-        for network in (self.internal, self.outside):
-            docker("network", "rm", network, check=False, timeout=30)
-        self._temporary.cleanup()
+        try:
+            if self.session and self.port:
+                try:
+                    self.api("POST", f"/session/{self.session}/abort")
+                except (EngineError, OSError, subprocess.SubprocessError):
+                    pass
+            operations = [("rm", "--force", "--volumes", self.agent, self.agent + "-check", self.gateway)]
+            operations += [("network", "rm", network) for network in (self.internal, self.outside)]
+            for operation in operations:
+                try:
+                    docker(*operation, check=False, timeout=60 if operation[0] == "rm" else 30)
+                except (EngineError, OSError, subprocess.SubprocessError) as error:
+                    # Cleanup must still remove the private credential file if
+                    # the Docker daemon becomes unreachable during shutdown.
+                    print(f"Sandbox cleanup could not remove {operation[0]} resources ({type(error).__name__}).")
+        finally:
+            self._temporary.cleanup()
 
     @contextmanager
     def paused(self):
@@ -382,6 +411,7 @@ class Engine:
         shutil.rmtree(state, ignore_errors=True)
         self._state_dir("check-state")
         try:
+            self._verify_internal_network()
             docker("run", "--detach", "--name", container, "--network", self.internal,
                    *self._limits(self.config.limits.memory_mb), "--workdir", "/workspace",
                    "--mount", f"type=bind,src={tree},dst=/workspace", "--mount", f"type=bind,src={state},dst=/state",

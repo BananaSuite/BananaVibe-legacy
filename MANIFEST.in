@@ -1,0 +1,11 @@
+include *.md LICENSE NOTICE THIRD_PARTY_NOTICES.md banana-logo.png
+include action.yml Dockerfile.sandbox requirements.txt
+include .gitignore .dockerignore
+include banana_backup/shared-files.json
+recursive-include .github *.yml *.md
+recursive-include docs *.md
+recursive-include examples *.toml *.yml
+recursive-include sandbox *.py OPENCODE-LICENSE
+recursive-include scripts *.py
+recursive-include tests *.py
+global-exclude *.py[cod] __pycache__
